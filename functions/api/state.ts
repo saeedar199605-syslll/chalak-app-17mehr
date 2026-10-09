@@ -388,7 +388,9 @@ function hasAuthorizedEvaluationChanges(current: CloudState, changes: CloudState
     const byId = new Map((Array.isArray(current.pe_evaluations) ? current.pe_evaluations as Evaluation[] : []).map(item => [item.id, item]));
     const incomingIds = new Set((changes.pe_evaluations as Evaluation[]).map(item => item.id));
     if ([...byId.values()].some(item => !incomingIds.has(item.id) && (item.status === 'locked' || item.stage === 'completed'))) return false;
-    return (changes.pe_evaluations as Evaluation[]).every(incoming => validateEvaluationWrite(byId.get(incoming?.id), incoming, { actor, employees: getEmployees(current), criteria: (current.pe_criteria || []) as Criterion[], profiles: getProfiles(current), delegations: getDelegations(current), permissionPolicy: getPermissionPolicy(current), routeRules: getRouteRules(current), sourceImport: protectedSourceImport }) === null);
+    const validationContext = { actor, employees: getEmployees(current), criteria: (current.pe_criteria || []) as Criterion[], profiles: getProfiles(current), delegations: getDelegations(current), permissionPolicy: getPermissionPolicy(current), routeRules: getRouteRules(current), sourceImport: protectedSourceImport };
+    // Unchanged entries in an expanded patch are the exact stored objects.
+    return (changes.pe_evaluations as Evaluation[]).every(incoming => byId.get(incoming?.id) === incoming || validateEvaluationWrite(byId.get(incoming?.id), incoming, validationContext) === null);
   }
   if (Object.keys(changes).some(key => !NON_ADMIN_WRITABLE_KEYS.has(key))) return false;
   const byId = new Map((Array.isArray(current.pe_evaluations) ? current.pe_evaluations as EvaluationRecord[] : []).map(item => [item.id, item]));
@@ -793,13 +795,14 @@ function mergeAuthorizedState(current: CloudState, changes: CloudState, session:
     const currentById = new Map(currentEvaluations.map(item => [item.id, item]));
     const incoming = (changes.pe_evaluations as EvaluationRecord[]).filter(item => {
       const existing = currentById.get(item?.id);
-      return !existing || JSON.stringify(existing) !== JSON.stringify(item);
+      return existing !== item && (!existing || JSON.stringify(existing) !== JSON.stringify(item));
     });
     const byId = new Map(currentEvaluations.map(item => [item.id, item]));
     let notifications = getNotifications(current);
     const notificationEventKeys = new Set(notifications.map(item => item.eventKey));
     const employeeIds = new Set(getEmployees(current).map(employee => employee.id));
-    const audit = Array.isArray(current.pe_audit_logs) ? [...current.pe_audit_logs as Array<Record<string, unknown>>] : [];
+    // Accumulate new entries separately: do not shift 10,000 old audit entries per row.
+    const audit: Array<Record<string, unknown>> = [];
     // Protected imports carry only the evaluations changed by that source batch.
     // Treating the partial batch as a full Admin replacement would delete every
     // unrelated open evaluation omitted from the import payload.
@@ -928,7 +931,7 @@ function mergeAuthorizedState(current: CloudState, changes: CloudState, session:
     }
     next.pe_evaluations = Array.from(byId.values());
     next.pe_notifications = notifications.slice(0, 10_000);
-    next.pe_audit_logs = audit.slice(0, 10_000);
+    next.pe_audit_logs = [...audit, ...(Array.isArray(current.pe_audit_logs) ? current.pe_audit_logs as Array<Record<string, unknown>> : [])].slice(0, 10_000);
   }
   if (Array.isArray(changes.pe_delegations)) {
     const byId = new Map(getDelegations(current).map(item => [item.id, item]));
@@ -1086,7 +1089,15 @@ export async function onRequestGet(context: Context): Promise<Response> {
   const { env, data } = context;
   if (!data.session) return jsonResponse({ error: 'Authentication required.', code: 'authentication_required', reason: 'authentication_required', retryable: false }, 401);
   try {
-    const { state, meta } = await readState(env);
+    const operationId = new URL(context.request.url).searchParams.get('operationId');
+    const { state, meta } = await readState(env, operationId || undefined);
+    if (operationId) {
+      const receipts = Array.isArray(state.__operation_receipts) ? state.__operation_receipts as Array<Record<string, unknown>> : [];
+      const receipt = receipts.find(item => item.operationId === operationId && item.actorId === data.session!.id);
+      if (!receipt) return jsonResponse({ accepted: false, operationId, revision: meta.revision });
+      const { __operation_receipts: _receipts, ...visibleState } = state;
+      return jsonResponse({ accepted: true, operationId, state: scopedState(visibleState, data.session), ...meta });
+    }
     return responseEnvelope(state, meta, data.session);
   } catch (error) {
     if (error instanceof StateStoreUnavailable) {
