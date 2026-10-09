@@ -383,14 +383,31 @@ export class AppDatabase {
       this.managedCommitQueueDepth = Math.max(0, this.managedCommitQueueDepth - 1);
       this.activeManagedWrites += 1;
       this.maxConcurrentManagedWrites = Math.max(this.maxConcurrentManagedWrites, this.activeManagedWrites);
+      const operationId = this.pendingBulkOperation?.id || this.pendingStateCommit?.id;
+      const reconcile = async (): Promise<Response | null> => {
+        if (!operationId) return null;
+        try {
+          const response = await fetch(`/api/state?operationId=${encodeURIComponent(operationId)}`, { credentials: 'same-origin', signal: AbortSignal.timeout(15_000) });
+          if (response.ok && (await response.clone().json()).accepted === true) return response;
+        } catch { /* An unconfirmed receipt is never success. */ }
+        return null;
+      };
       try {
-        return await fetch('/api/state', {
+        const response = await fetch('/api/state', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json', 'X-Chalak-Retry-Count': String(retryCount) },
           signal,
           body,
         });
+        if (operationId && response.status === 503) {
+          return await reconcile() || response;
+        }
+        return response;
+      } catch (error) {
+        const accepted = await reconcile();
+        if (accepted) return accepted;
+        throw error;
       } finally {
         this.activeManagedWrites = Math.max(0, this.activeManagedWrites - 1);
       }
@@ -1518,7 +1535,7 @@ export class AppDatabase {
         const operation = selectCloudSyncOperation(this.hasRevisionConflict, this.dirtyKeys.size);
         return operation === 'push' ? await this.pushStateToCloudInternal(false, true, explicitRetry) : await this.pullFromCloud();
       }
-      if (mode === 'push') return this.pushStateToCloudInternal(forceAll, true, explicitRetry, onlyKeys);
+      if (mode === 'push') return await this.pushStateToCloudInternal(forceAll, true, explicitRetry, onlyKeys);
       return this.pullFromCloud();
     } finally {
       this.isSyncing = false;
@@ -1836,7 +1853,7 @@ export class AppDatabase {
       timeoutId = null;
       const contentType = res.headers.get('Content-Type') || '';
       if (!contentType.includes('application/json')) {
-        this.emitCloudStatus('error', 'API فضای ابری در این اجرا فعال نیست؛ ذخیره فقط محلی انجام شد.');
+        this.emitCloudStatus('error', `سرور پاسخ معتبر ذخیره نداد (${res.status})؛ نتیجه تأیید نشد و تغییرات حفظ شدند.`, { rejectedStatus: res.status, retryable: false, operationId });
         return false;
       }
       const result = contentType.includes('application/json')

@@ -639,7 +639,8 @@ export default function ExcelIntegrationCenter({
     setIsKasraApplying(true);
     setErrorMessage('');
     try {
-      const accepted = await onUpdateEvaluations(updatedEvaluations, sourceImport);
+      const changedEvaluations = updatedEvaluations.filter((record, index) => record !== evaluations[index]);
+    const accepted = await onUpdateEvaluations(changedEvaluations, sourceImport);
       if (accepted !== true) {
         setErrorMessage('سرور ذخیره کسری را تأیید نکرد؛ تغییر در ارزیابی‌ها ثبت نشد. بررسی کنید مجوز و اتصال برقرار باشد.');
         return;
@@ -876,10 +877,11 @@ export default function ExcelIntegrationCenter({
       evaluationPeriodId: selectedPeriodId,
       rowsRead: misRecords.length + misCounts.invalid,
     };
-    const accepted = await onUpdateEvaluations(updatedEvaluations, sourceImport);
+    const changedEvaluations = updatedEvaluations.filter((record, index) => record !== evaluations[index]);
+    const accepted = await onUpdateEvaluations(changedEvaluations, sourceImport);
     setIsProcessing(false);
     if (accepted !== true) {
-      setErrorMessage('سرور ذخیره MIS را تأیید نکرد؛ تغییر در ارزیابی‌ها ثبت نشد. بررسی کنید مجوز و اتصال برقرار باشد.');
+      setErrorMessage(db.getLastCloudWriteFailure()?.message || 'سرور نتیجه ذخیره MIS را تأیید نکرد؛ پیش‌نمایش حفظ شد. پیش از تلاش دوباره نتیجه سرور را بررسی کنید.');
       return;
     }
     setLastAcceptedImport({ operationId: sourceImport.operationId, importType: 'MIS' });
@@ -892,7 +894,7 @@ export default function ExcelIntegrationCenter({
       warnings
     });
 
-    setSuccessMessage(`داده‌های تولید و کیفیت MIS با موفقیت در شاخص‌های تولیدی ${totalProcessed} پرونده ارزیابی نشست و پایدار شد (${slotsPopulated} اسلات نمره). معیارهای دستی سرپرست بدون تغییر محافظت شدند.`);
+    setSuccessMessage(`داده‌های تولید و کیفیت MIS با موفقیت در شاخص‌های تولیدی ${totalProcessed} پرونده ارزیابی نشست و پایدار شد (${slotsPopulated} اسلات نمره؛ ${warnings.length + misCounts.invalid} ردیف ردشده). معیارهای دستی سرپرست بدون تغییر محافظت شدند.`);
     setIsMisConfirmOpen(false);
     } catch (error) { setErrorMessage(error instanceof Error ? error.message : 'ذخیره ابری ناموفق بود؛ پیش‌نمایش حفظ شد.'); }
     finally { importSubmitting.current = false; setIsProcessing(false); setIsKasraApplying(false); }
@@ -950,7 +952,7 @@ export default function ExcelIntegrationCenter({
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
-      if (isMisConfirmOpen) setIsMisConfirmOpen(false);
+      if (isMisConfirmOpen && !isProcessing) setIsMisConfirmOpen(false);
       else if (isKasraConfirmOpen && !isKasraApplying) setIsKasraConfirmOpen(false);
       else if (!isProcessing && !isKasraApplying) latestOnClose.current();
       return;
@@ -1976,7 +1978,9 @@ export default function ExcelIntegrationCenter({
                   <div className="w-full max-w-lg space-y-4 rounded-2xl border border-emerald-500/30 bg-slate-900 p-5 text-right shadow-2xl">
                     <h3 id="mis-confirm-title" className="text-sm font-black text-slate-100">تأیید درون‌ریزی داده‌های MIS</h3>
                     <p className="text-xs leading-6 text-slate-300">دوره: <strong>{misExpectedPeriod}</strong> · رکوردهای معتبر: <strong>{misRecords.length}</strong> · واجد شرایط: <strong>{misEligibleCount}</strong> · ردشده: <strong>{misRecords.length - misEligibleCount}</strong>. فقط مقادیر MIS با کد پرسنلی منطبق در ارزیابی‌های همین دوره ثبت می‌شوند؛ امتیازهای دستی سرپرست حفظ و مقادیر MIS پس از ثبت فقط‌خواندنی خواهند بود.</p>
-                    <div className="flex justify-end gap-2"><button type="button" onClick={() => setIsMisConfirmOpen(false)} className="rounded-xl bg-slate-700 px-4 py-2 text-xs font-bold text-white">بازگشت به پیش‌نمایش</button><button type="button" onClick={handleApplyMISRecords} disabled={isProcessing || !misEligibleCount} className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-black text-slate-950">تأیید و اعمال {misEligibleCount} رکورد</button></div>
+                    {isProcessing && <p role="status" className="text-xs text-teal-300">در حال ذخیره MIS؛ منتظر تأیید سرور باشید…</p>}
+                    {errorMessage && <p role="alert" className="text-xs text-rose-300">{errorMessage}</p>}
+                    <div className="flex justify-end gap-2"><button type="button" disabled={isProcessing} onClick={() => setIsMisConfirmOpen(false)} className="rounded-xl bg-slate-700 px-4 py-2 text-xs font-bold text-white">بازگشت به پیش‌نمایش</button><button type="button" onClick={handleApplyMISRecords} disabled={isProcessing || !misEligibleCount} className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-black text-slate-950">{isProcessing ? 'در حال ذخیره…' : `تأیید و اعمال ${misEligibleCount} رکورد`}</button></div>
                   </div>
                 </div>}
               </div>
